@@ -248,9 +248,9 @@ def handler(event, context):
             ).json()['result']['file_path']
             photo_url = f'https://api.telegram.org/file/bot{TG_TOKEN}/{file_info}'
             attachment = upload_photo_to_vk(photo_url)
-            vk_msg_id = send_vk(f'[TG] {full_name}: {clean}', attachment=attachment, reply_to=vk_reply_to)
-        elif clean:
-            vk_msg_id = send_vk(f'[TG] {full_name}: {clean}', reply_to=vk_reply_to)
+            vk_msg_id = send_vk(f'[TG] {full_name}: {content}', attachment=attachment, reply_to=vk_reply_to)
+        elif content:
+            vk_msg_id = send_vk(f'[TG] {full_name}: {content}', reply_to=vk_reply_to)
 
         if vk_msg_id and tg_msg_id:
             mapping['tg_to_vk'][tg_msg_id] = str(vk_msg_id)
