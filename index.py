@@ -227,28 +227,30 @@ def handler(event, context):
             vk_reply_to = mapping['tg_to_vk'].get(reply_tg_id)
             print("TG REPLY:", reply_tg_id, "→ VK:", vk_reply_to)
 
+        # убираем упоминание бота из текста если есть
+        clean = content
         for ent in entities:
             if ent.get('type') == 'mention':
                 mention = content[ent['offset']:ent['offset']+ent['length']]
                 if mention.lstrip('@').lower() == TG_BOT_USERNAME.lower():
                     clean = content.replace(mention, '').strip()
-                    vk_msg_id = None
-                    if photo:
-                        file_id = photo[-1]['file_id']
-                        file_info = requests.get(
-                            f'https://api.telegram.org/bot{TG_TOKEN}/getFile',
-                            params={'file_id': file_id}
-                        ).json()['result']['file_path']
-                        photo_url = f'https://api.telegram.org/file/bot{TG_TOKEN}/{file_info}'
-                        attachment = upload_photo_to_vk(photo_url)
-                        vk_msg_id = send_vk(f'[TG] {full_name}: {clean}', attachment=attachment, reply_to=vk_reply_to)
-                    elif clean:
-                        vk_msg_id = send_vk(f'[TG] {full_name}: {clean}', reply_to=vk_reply_to)
 
-                    if vk_msg_id and tg_msg_id:
-                        mapping['tg_to_vk'][tg_msg_id] = str(vk_msg_id)
-                        mapping['vk_to_tg'][str(vk_msg_id)] = int(tg_msg_id)
-                        save_mapping(mapping)
-                    break
+        vk_msg_id = None
+        if photo:
+            file_id = photo[-1]['file_id']
+            file_info = requests.get(
+                f'https://api.telegram.org/bot{TG_TOKEN}/getFile',
+                params={'file_id': file_id}
+            ).json()['result']['file_path']
+            photo_url = f'https://api.telegram.org/file/bot{TG_TOKEN}/{file_info}'
+            attachment = upload_photo_to_vk(photo_url)
+            vk_msg_id = send_vk(f'[TG] {full_name}: {clean}', attachment=attachment, reply_to=vk_reply_to)
+        elif clean:
+            vk_msg_id = send_vk(f'[TG] {full_name}: {clean}', reply_to=vk_reply_to)
+
+        if vk_msg_id and tg_msg_id:
+            mapping['tg_to_vk'][tg_msg_id] = str(vk_msg_id)
+            mapping['vk_to_tg'][str(vk_msg_id)] = int(tg_msg_id)
+            save_mapping(mapping)
 
     return {'statusCode': 200, 'body': 'ok'}
