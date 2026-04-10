@@ -27,13 +27,15 @@ def load_mapping():
         obj = s3.get_object(Bucket=S3_BUCKET, Key='mapping.json')
         return json.loads(obj['Body'].read())
     except Exception:
-        return {'tg_to_vk': {}, 'vk_to_tg': {}}
+        return {'tg_to_vk': {}, 'vk_to_tg': {}, 'processed_updates': []}
 
 def save_mapping(mapping):
     for key in ['tg_to_vk', 'vk_to_tg']:
         if len(mapping[key]) > 100:
             items = list(mapping[key].items())[-100:]
             mapping[key] = dict(items)
+    # храним только последние 200 update_id
+    mapping['processed_updates'] = mapping.get('processed_updates', [])[-200:]
     s3.put_object(Bucket=S3_BUCKET, Key='mapping.json', Body=json.dumps(mapping))
 
 def get_vk_name(user_id):
@@ -130,6 +132,14 @@ def handler(event, context):
         return {'statusCode': 400, 'body': 'bad json'}
 
     mapping = load_mapping()
+
+    # защита от дублей Telegram
+    update_id = body.get('update_id')
+    if update_id:
+        if update_id in mapping.get('processed_updates', []):
+            print("DUPLICATE update_id:", update_id)
+            return {'statusCode': 200, 'body': 'ok'}
+        mapping.setdefault('processed_updates', []).append(update_id)
 
     # VK Callback API
     if 'type' in body:
