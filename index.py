@@ -195,6 +195,8 @@ def handler(event, context):
     # Telegram сообщения
     if 'message' in body:
         msg = body['message']
+        if str(msg.get('chat', {}).get('id', '')) != TG_CHAT_ID:
+            return {'statusCode': 200, 'body': 'ok'}
         if msg.get('from', {}).get('is_bot'):
             return {'statusCode': 200, 'body': 'ok'}
 
