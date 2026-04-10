@@ -227,13 +227,17 @@ def handler(event, context):
             vk_reply_to = mapping['tg_to_vk'].get(reply_tg_id)
             print("TG REPLY:", reply_tg_id, "→ VK:", vk_reply_to)
 
-        # убираем упоминание бота из текста если есть
-        clean = content
+        # если упомянут бот — не пересылаем
+        bot_mentioned = False
         for ent in entities:
             if ent.get('type') == 'mention':
                 mention = content[ent['offset']:ent['offset']+ent['length']]
                 if mention.lstrip('@').lower() == TG_BOT_USERNAME.lower():
-                    clean = content.replace(mention, '').strip()
+                    bot_mentioned = True
+                    break
+
+        if bot_mentioned:
+            return {'statusCode': 200, 'body': 'ok'}
 
         vk_msg_id = None
         if photo:
