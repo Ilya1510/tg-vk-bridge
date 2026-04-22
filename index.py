@@ -105,7 +105,7 @@ def send_vk(text, attachment=None, reply_to=None):
             'is_reply': True,
         })
     print("SEND_VK params:", {k: v for k, v in params.items() if k != 'access_token'})
-    r = requests.post('https://api.vk.com/method/messages.send', params=params)
+    r = requests.post('https://api.vk.com/method/messages.send', data=params)
     print("SEND_VK response:", r.text)
     try:
         msg_id = r.json()['response']
