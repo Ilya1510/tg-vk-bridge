@@ -1,4 +1,4 @@
-import json, os, requests, random, boto3
+import json, os, requests, random, time, boto3
 from botocore.config import Config
 
 TG_TOKEN = os.environ['TG_TOKEN']
@@ -8,6 +8,7 @@ VK_PEER_ID = int(os.environ['VK_PEER_ID'])
 VK_CONFIRM = os.environ['VK_CONFIRM']
 TG_BOT_USERNAME = os.environ['TG_BOT_USERNAME']
 S3_BUCKET = os.environ['S3_BUCKET']
+REQUEST_TIMEOUT = (5, 8)
 
 VK_REACTIONS = {
     1: '❤️', 2: '🔥', 3: '😂', 4: '👍',
@@ -19,14 +20,20 @@ VK_REACTIONS = {
 s3 = boto3.client(
     's3',
     endpoint_url='https://storage.yandexcloud.net',
-    config=Config(signature_version='s3v4'),
+    config=Config(
+        signature_version='s3v4',
+        connect_timeout=2,
+        read_timeout=4,
+        retries={'max_attempts': 2},
+    ),
 )
 
 def load_mapping():
     try:
         obj = s3.get_object(Bucket=S3_BUCKET, Key='mapping.json')
         return json.loads(obj['Body'].read())
-    except Exception:
+    except Exception as e:
+        print("MAPPING load error:", repr(e))
         return {'tg_to_vk': {}, 'vk_to_tg': {}, 'processed_updates': []}
 
 def save_mapping(mapping):
@@ -44,7 +51,7 @@ def get_vk_name(user_id):
             'access_token': VK_TOKEN,
             'user_ids': user_id,
             'v': '5.199',
-        }).json()
+        }, timeout=REQUEST_TIMEOUT).json()
         user = r['response'][0]
         return f"{user['first_name']} {user['last_name']}"
     except Exception:
@@ -57,10 +64,10 @@ def send_tg(text, photo_url=None, reply_to=None):
     if photo_url:
         payload['caption'] = text
         r = requests.post(f'https://api.telegram.org/bot{TG_TOKEN}/sendPhoto',
-                         json={**payload, 'photo': photo_url})
+                         json={**payload, 'photo': photo_url}, timeout=REQUEST_TIMEOUT)
     else:
         payload['text'] = text
-        r = requests.post(f'https://api.telegram.org/bot{TG_TOKEN}/sendMessage', json=payload)
+        r = requests.post(f'https://api.telegram.org/bot{TG_TOKEN}/sendMessage', json=payload, timeout=REQUEST_TIMEOUT)
     try:
         return r.json()['result']['message_id']
     except Exception:
@@ -72,16 +79,16 @@ def upload_photo_to_vk(photo_url):
             'access_token': VK_TOKEN,
             'peer_id': VK_PEER_ID,
             'v': '5.199',
-        }).json()['response']['upload_url']
-        img_data = requests.get(photo_url).content
-        uploaded = requests.post(server, files={'photo': ('photo.jpg', img_data, 'image/jpeg')}).json()
+        }, timeout=REQUEST_TIMEOUT).json()['response']['upload_url']
+        img_data = requests.get(photo_url, timeout=REQUEST_TIMEOUT).content
+        uploaded = requests.post(server, files={'photo': ('photo.jpg', img_data, 'image/jpeg')}, timeout=REQUEST_TIMEOUT).json()
         saved = requests.post('https://api.vk.com/method/photos.saveMessagesPhoto', params={
             'access_token': VK_TOKEN,
             'photo': uploaded['photo'],
             'server': uploaded['server'],
             'hash': uploaded['hash'],
             'v': '5.199',
-        }).json()['response'][0]
+        }, timeout=REQUEST_TIMEOUT).json()['response'][0]
         return f"photo{saved['owner_id']}_{saved['id']}"
     except Exception as e:
         print("Photo upload error:", e)
@@ -105,7 +112,7 @@ def send_vk(text, attachment=None, reply_to=None):
             'is_reply': True,
         })
     print("SEND_VK params:", {k: v for k, v in params.items() if k != 'access_token'})
-    r = requests.post('https://api.vk.com/method/messages.send', data=params)
+    r = requests.post('https://api.vk.com/method/messages.send', data=params, timeout=REQUEST_TIMEOUT)
     print("SEND_VK response:", r.text)
     try:
         msg_id = r.json()['response']
@@ -114,15 +121,54 @@ def send_vk(text, attachment=None, reply_to=None):
             'access_token': VK_TOKEN,
             'message_ids': msg_id,
             'v': '5.199',
-        }).json()
+        }, timeout=REQUEST_TIMEOUT).json()
         cmid = info['response']['items'][0]['conversation_message_id']
         return cmid
     except Exception:
         return None
 
+def poll_telegram():
+    mapping = load_mapping()
+    params = {
+        'timeout': 0,
+        'limit': 20,
+        'allowed_updates': json.dumps(['message', 'message_reaction']),
+    }
+    if mapping.get('telegram_offset'):
+        params['offset'] = mapping['telegram_offset']
+
+    try:
+        r = requests.get(
+            f'https://api.telegram.org/bot{TG_TOKEN}/getUpdates',
+            params=params,
+            timeout=REQUEST_TIMEOUT,
+        )
+        updates = r.json().get('result', [])
+    except Exception as e:
+        print("TG_POLL getUpdates error:", repr(e))
+        return {'statusCode': 200, 'body': json.dumps({'updates': 0, 'processed': 0, 'error': 'getUpdates failed'})}
+    print("TG_POLL updates:", len(updates))
+
+    processed = 0
+    for update in updates:
+        update_id = update.get('update_id')
+        if update_id is None:
+            continue
+        try:
+            handler({'body': json.dumps(update)}, None)
+            processed += 1
+            mapping = load_mapping()
+            mapping['telegram_offset'] = update_id + 1
+            save_mapping(mapping)
+        except Exception as e:
+            print("TG_POLL update error:", update_id, repr(e))
+            break
+
+    return {'statusCode': 200, 'body': json.dumps({'updates': len(updates), 'processed': processed})}
+
 def handler(event, context):
+    handler_started = time.time()
     body_raw = event.get('body', '{}')
-    print("BODY:", body_raw)
     if event.get('isBase64Encoded'):
         import base64
         body_raw = base64.b64decode(body_raw).decode('utf-8')
@@ -130,6 +176,10 @@ def handler(event, context):
         body = json.loads(body_raw)
     except Exception:
         return {'statusCode': 400, 'body': 'bad json'}
+    print("BODY keys:", list(body.keys()))
+
+    if body.get('mode') == 'telegram_poll':
+        return poll_telegram()
 
     mapping = load_mapping()
 
@@ -193,6 +243,8 @@ def handler(event, context):
     # Telegram реакции
     if 'message_reaction' in body:
         reaction = body['message_reaction']
+        if reaction.get('date'):
+            print("TG_LAG seconds:", round(handler_started - reaction['date'], 3))
         if str(reaction.get('chat', {}).get('id', '')) == TG_CHAT_ID:
             from_user = reaction.get('user', {}).get('first_name', 'Кто-то')
             new_reactions = reaction.get('new_reaction', [])
@@ -205,6 +257,8 @@ def handler(event, context):
     # Telegram сообщения
     if 'message' in body:
         msg = body['message']
+        if msg.get('date'):
+            print("TG_LAG seconds:", round(handler_started - msg['date'], 3))
         if str(msg.get('chat', {}).get('id', '')) != TG_CHAT_ID:
             return {'statusCode': 200, 'body': 'ok'}
         if msg.get('from', {}).get('is_bot'):
@@ -244,7 +298,8 @@ def handler(event, context):
             file_id = photo[-1]['file_id']
             file_info = requests.get(
                 f'https://api.telegram.org/bot{TG_TOKEN}/getFile',
-                params={'file_id': file_id}
+                params={'file_id': file_id},
+                timeout=REQUEST_TIMEOUT,
             ).json()['result']['file_path']
             photo_url = f'https://api.telegram.org/file/bot{TG_TOKEN}/{file_info}'
             attachment = upload_photo_to_vk(photo_url)
