@@ -1,4 +1,4 @@
-import json, os, requests, random, tempfile, time, boto3
+import configparser, json, os, requests, random, tempfile, time, boto3
 from botocore.config import Config
 
 TG_TOKEN = os.environ['TG_TOKEN']
@@ -10,6 +10,8 @@ TG_BOT_USERNAME = os.environ['TG_BOT_USERNAME']
 S3_BUCKET = os.environ['S3_BUCKET']
 REQUEST_TIMEOUT = (5, 8)
 VK_GROUP_ID = os.environ.get('VK_GROUP_ID', '').strip()
+TG_CLIENT_CONFIG = os.environ.get('TG_CLIENT_CONFIG', '/opt/tg-vk-bridge/.tg_client.conf')
+TG_CLIENT_SESSION = os.environ.get('TG_CLIENT_SESSION', '/opt/tg-vk-bridge/.tg_client')
 
 VK_REACTIONS = {
     1: '❤️', 2: '🔥', 3: '😂', 4: '👍',
@@ -95,31 +97,62 @@ def upload_photo_to_vk(photo_url):
         print("Photo upload error:", e)
         return None
 
+class TelegramFileError(Exception):
+    pass
+
 def get_tg_file_url(file_id):
-    file_path = requests.get(
+    body = requests.get(
         f'https://api.telegram.org/bot{TG_TOKEN}/getFile',
         params={'file_id': file_id},
         timeout=REQUEST_TIMEOUT,
-    ).json()['result']['file_path']
+    ).json()
+    if not body.get('ok'):
+        raise TelegramFileError(body.get('description') or 'Telegram getFile failed')
+    file_path = body['result']['file_path']
     return f'https://api.telegram.org/file/bot{TG_TOKEN}/{file_path}'
 
-def upload_video_to_vk(video_url, filename='telegram-video.mp4', mime_type='video/mp4'):
-    try:
-        params = {
+def get_vk_doc_upload_url():
+    return requests.get(
+        'https://api.vk.com/method/docs.getMessagesUploadServer',
+        params={
             'access_token': VK_TOKEN,
-            'name': filename,
-            'is_private': 1,
-            'wallpost': 0,
+            'peer_id': VK_PEER_ID,
+            'type': 'doc',
             'v': '5.199',
-        }
-        if VK_GROUP_ID:
-            params['group_id'] = VK_GROUP_ID.lstrip('-')
+        },
+        timeout=REQUEST_TIMEOUT,
+    ).json()['response']['upload_url']
 
-        saved = requests.get(
-            'https://api.vk.com/method/video.save',
-            params=params,
-            timeout=REQUEST_TIMEOUT,
-        ).json()['response']
+def save_vk_uploaded_doc(uploaded, filename):
+    saved = requests.post(
+        'https://api.vk.com/method/docs.save',
+        data={
+            'access_token': VK_TOKEN,
+            'file': uploaded['file'],
+            'title': filename,
+            'v': '5.199',
+        },
+        timeout=(5, 20),
+    ).json()['response']['doc']
+    return f"doc{saved['owner_id']}_{saved['id']}"
+
+def upload_video_file_to_vk(path, filename='telegram-video.mp4', mime_type='video/mp4'):
+    try:
+        upload_url = get_vk_doc_upload_url()
+        with open(path, 'rb') as video_file:
+            uploaded = requests.post(
+                upload_url,
+                files={'file': (filename, video_file, mime_type)},
+                timeout=(10, 120),
+            ).json()
+        return save_vk_uploaded_doc(uploaded, filename)
+    except Exception as e:
+        print("Video file upload error:", e)
+        return None
+
+def upload_video_url_to_vk(video_url, filename='telegram-video.mp4', mime_type='video/mp4'):
+    try:
+        upload_url = get_vk_doc_upload_url()
         with tempfile.NamedTemporaryFile() as tmp:
             with requests.get(video_url, stream=True, timeout=(5, 60)) as download:
                 download.raise_for_status()
@@ -128,18 +161,40 @@ def upload_video_to_vk(video_url, filename='telegram-video.mp4', mime_type='vide
                         tmp.write(chunk)
             tmp.seek(0)
             upload = requests.post(
-                saved['upload_url'],
-                files={'video_file': (filename, tmp, mime_type)},
+                upload_url,
+                files={'file': (filename, tmp, mime_type)},
                 timeout=(10, 120),
             ).json()
-        owner_id = upload.get('owner_id') or saved.get('owner_id')
-        video_id = upload.get('video_id') or upload.get('vid') or saved.get('video_id')
-        if owner_id and video_id:
-            return f"video{owner_id}_{video_id}"
-        print("Video upload error: missing owner_id/video_id", upload)
-        return None
+        return save_vk_uploaded_doc(upload, filename)
     except Exception as e:
-        print("Video upload error:", e)
+        print("Video URL upload error:", e)
+        return None
+
+def download_tg_media_with_client(chat_id, message_id, output_dir):
+    if not os.path.exists(TG_CLIENT_CONFIG) or not os.path.exists(f'{TG_CLIENT_SESSION}.session'):
+        print("TG client fallback unavailable")
+        return None
+
+    try:
+        from telethon.sync import TelegramClient
+    except Exception as e:
+        print("TG client import error:", repr(e))
+        return None
+
+    cfg = configparser.ConfigParser()
+    cfg.read(TG_CLIENT_CONFIG)
+    api_id = int(cfg['telegram']['api_id'])
+    api_hash = cfg['telegram']['api_hash']
+
+    try:
+        with TelegramClient(TG_CLIENT_SESSION, api_id, api_hash) as client:
+            message = client.get_messages(int(chat_id), ids=int(message_id))
+            if not message or not message.media:
+                print("TG client fallback: no media")
+                return None
+            return client.download_media(message, file=output_dir)
+    except Exception as e:
+        print("TG client fallback error:", repr(e))
         return None
 
 def send_vk(text, attachment=None, reply_to=None):
@@ -352,8 +407,18 @@ def handler(event, context):
             file_id = video['file_id']
             filename = video.get('file_name') or f"telegram-video-{tg_msg_id}.mp4"
             mime_type = video.get('mime_type') or 'video/mp4'
-            video_url = get_tg_file_url(file_id)
-            attachment = upload_video_to_vk(video_url, filename=filename, mime_type=mime_type)
+            attachment = None
+            try:
+                video_url = get_tg_file_url(file_id)
+                attachment = upload_video_url_to_vk(video_url, filename=filename, mime_type=mime_type)
+            except TelegramFileError as e:
+                print("TG getFile video error:", str(e))
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    local_video = download_tg_media_with_client(TG_CHAT_ID, tg_msg_id, tmp_dir)
+                    if local_video:
+                        attachment = upload_video_file_to_vk(local_video, filename=filename, mime_type=mime_type)
+            if not attachment:
+                content = f"{content}\n[видео не удалось скачать из Telegram]".strip()
             vk_msg_id = send_vk(f'[TG] {full_name}: {content}', attachment=attachment, reply_to=vk_reply_to)
         elif content:
             vk_msg_id = send_vk(f'[TG] {full_name}: {content}', reply_to=vk_reply_to)

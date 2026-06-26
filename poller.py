@@ -11,6 +11,10 @@ POLL_TIMEOUT = 25
 ERROR_SLEEP = 5
 
 
+def mask_error(error):
+    return repr(error).replace(index.TG_TOKEN, '***')
+
+
 def get_offset():
     mapping = index.load_mapping()
     return mapping.get('telegram_offset')
@@ -62,7 +66,7 @@ def main():
         try:
             poll_once()
         except Exception as e:
-            print("poller error", repr(e), flush=True)
+            print("poller error", mask_error(e), flush=True)
             time.sleep(ERROR_SLEEP)
 
 
