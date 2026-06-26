@@ -1,4 +1,4 @@
-import json, os, requests, random, time, boto3
+import json, os, requests, random, tempfile, time, boto3
 from botocore.config import Config
 
 TG_TOKEN = os.environ['TG_TOKEN']
@@ -9,6 +9,7 @@ VK_CONFIRM = os.environ['VK_CONFIRM']
 TG_BOT_USERNAME = os.environ['TG_BOT_USERNAME']
 S3_BUCKET = os.environ['S3_BUCKET']
 REQUEST_TIMEOUT = (5, 8)
+VK_GROUP_ID = os.environ.get('VK_GROUP_ID', '').strip()
 
 VK_REACTIONS = {
     1: '❤️', 2: '🔥', 3: '😂', 4: '👍',
@@ -92,6 +93,53 @@ def upload_photo_to_vk(photo_url):
         return f"photo{saved['owner_id']}_{saved['id']}"
     except Exception as e:
         print("Photo upload error:", e)
+        return None
+
+def get_tg_file_url(file_id):
+    file_path = requests.get(
+        f'https://api.telegram.org/bot{TG_TOKEN}/getFile',
+        params={'file_id': file_id},
+        timeout=REQUEST_TIMEOUT,
+    ).json()['result']['file_path']
+    return f'https://api.telegram.org/file/bot{TG_TOKEN}/{file_path}'
+
+def upload_video_to_vk(video_url, filename='telegram-video.mp4', mime_type='video/mp4'):
+    try:
+        params = {
+            'access_token': VK_TOKEN,
+            'name': filename,
+            'is_private': 1,
+            'wallpost': 0,
+            'v': '5.199',
+        }
+        if VK_GROUP_ID:
+            params['group_id'] = VK_GROUP_ID.lstrip('-')
+
+        saved = requests.get(
+            'https://api.vk.com/method/video.save',
+            params=params,
+            timeout=REQUEST_TIMEOUT,
+        ).json()['response']
+        with tempfile.NamedTemporaryFile() as tmp:
+            with requests.get(video_url, stream=True, timeout=(5, 60)) as download:
+                download.raise_for_status()
+                for chunk in download.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        tmp.write(chunk)
+            tmp.seek(0)
+            upload = requests.post(
+                saved['upload_url'],
+                files={'video_file': (filename, tmp, mime_type)},
+                timeout=(10, 120),
+            ).json()
+        owner_id = upload.get('owner_id') or saved.get('owner_id')
+        video_id = upload.get('video_id') or upload.get('vid') or saved.get('video_id')
+        if owner_id and video_id:
+            return f"video{owner_id}_{video_id}"
+        print("Video upload error: missing owner_id/video_id", upload)
+        return None
+    except Exception as e:
+        print("Video upload error:", e)
         return None
 
 def send_vk(text, attachment=None, reply_to=None):
@@ -271,6 +319,7 @@ def handler(event, context):
         last_name = msg.get('from', {}).get('last_name', '')
         full_name = f"{from_user} {last_name}".strip()
         photo = msg.get('photo')
+        video = msg.get('video')
         content = text or caption
         tg_msg_id = str(msg.get('message_id', ''))
 
@@ -296,13 +345,15 @@ def handler(event, context):
         vk_msg_id = None
         if photo:
             file_id = photo[-1]['file_id']
-            file_info = requests.get(
-                f'https://api.telegram.org/bot{TG_TOKEN}/getFile',
-                params={'file_id': file_id},
-                timeout=REQUEST_TIMEOUT,
-            ).json()['result']['file_path']
-            photo_url = f'https://api.telegram.org/file/bot{TG_TOKEN}/{file_info}'
+            photo_url = get_tg_file_url(file_id)
             attachment = upload_photo_to_vk(photo_url)
+            vk_msg_id = send_vk(f'[TG] {full_name}: {content}', attachment=attachment, reply_to=vk_reply_to)
+        elif video:
+            file_id = video['file_id']
+            filename = video.get('file_name') or f"telegram-video-{tg_msg_id}.mp4"
+            mime_type = video.get('mime_type') or 'video/mp4'
+            video_url = get_tg_file_url(file_id)
+            attachment = upload_video_to_vk(video_url, filename=filename, mime_type=mime_type)
             vk_msg_id = send_vk(f'[TG] {full_name}: {content}', attachment=attachment, reply_to=vk_reply_to)
         elif content:
             vk_msg_id = send_vk(f'[TG] {full_name}: {content}', reply_to=vk_reply_to)

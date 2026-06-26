@@ -10,6 +10,7 @@ Telegram → VK работает через long polling на маленькой
 - **Telegram → VK**: упомяни `@gridasov_family_bridge_bot текст` — сообщение придёт в VK беседу
 - **VK → Telegram**: любое сообщение от человека в VK беседе приходит в Telegram чат
 - Пересылка фотографий в обе стороны
+- Пересылка видео из Telegram в VK
 - Reply (ответы на сообщения) в обе стороны
 - Реакции в обе стороны
 - Бот не пересылает сам себя (защита от бесконечного цикла)
@@ -56,6 +57,7 @@ Telegram чат "Семья"
 | `VK_PEER_ID` | peer_id VK беседы |
 | `VK_CONFIRM` | Строка подтверждения Callback API VK |
 | `TG_BOT_USERNAME` | Username бота без @ |
+| `VK_GROUP_ID` | ID VK-сообщества без `club`, нужен для загрузки видео из Telegram в VK |
 | `S3_BUCKET` | Имя бакета в Object Storage |
 | `AWS_ACCESS_KEY_ID` | Ключ сервисного аккаунта Yandex |
 | `AWS_SECRET_ACCESS_KEY` | Секрет сервисного аккаунта Yandex |
